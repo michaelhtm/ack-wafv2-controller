@@ -2204,11 +2204,12 @@ func (rm *resourceManager) sdkCreate(
 	}
 
 	rm.setStatusDefaults(ko)
-	// After creation, sync the logging configuration if specified
+	// LoggingConfiguration is applied via a separate PutLoggingConfiguration call.
+	// Defer it to the update path: mark the resource unsynced so the runtime
+	// requeues and the delta-driven update applies the logging configuration.
 	if ko.Spec.LoggingConfiguration != nil {
-		if err = syncLoggingConfiguration(ctx, rm, &resource{ko}, nil); err != nil {
-			return nil, err
-		}
+		msg := "Logging configuration update pending; resource will be requeued to sync logging configuration"
+		ackcondition.SetSynced(&resource{ko}, corev1.ConditionFalse, &msg, nil)
 	}
 
 	return &resource{ko}, nil
@@ -4357,15 +4358,20 @@ func (rm *resourceManager) sdkUpdate(
 	if err := rm.setInputRulesNestedStatements(input.Rules, desired); err != nil {
 		return nil, err
 	}
+	// Carry the latest observed status onto a copy of desired so the returned
+	// resource reflects the observed state (including conditions) rather than a
+	// stale create-time condition, allowing the resource to converge to synced.
+	updatedDesired := rm.concreteResource(desired.DeepCopy())
+	updatedDesired.SetStatus(latest)
 	if delta.DifferentAt("Spec.LoggingConfiguration") {
 		// Call the syncLoggingConfiguration function to update the logging configuration
-		err = syncLoggingConfiguration(ctx, rm, desired, delta)
+		err = syncLoggingConfiguration(ctx, rm, updatedDesired, delta)
 		if err != nil {
 			return nil, err
 		}
 	}
 	if !delta.DifferentExcept("Spec.LoggingConfiguration") {
-		return
+		return rm.concreteResource(updatedDesired), nil
 	}
 
 	var resp *svcsdk.UpdateWebACLOutput
